@@ -1,5 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 
+// TODO: Check alignment
+#[repr(C, align(4))]
+#[derive(Debug, Default, Clone, Copy, Zeroable, Pod)]
+pub struct Config {
+    pub num_bodies: u32,
+    pub dt: f32,
+}
+
 #[repr(C, align(16))]
 #[derive(Debug, Default, Clone, Copy, Zeroable, Pod)]
 pub struct Body {
