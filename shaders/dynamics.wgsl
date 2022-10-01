@@ -1,6 +1,7 @@
 struct Config {
     num_bodies: u32,
     dt: f32,
+    _pad: vec2<u32>,
 }
 
 struct Body {
@@ -10,9 +11,9 @@ struct Body {
     mu: f32, // Size: 4, Align: 4, Upto: 36
 }
 
-@group(0) @binding(0) var<storage> config: Config;
-@group(1) @binding(0) var<storage, read> input : array<Body, 65536>;
-@group(1) @binding(1) var<storage, read_write> output : array<Body, 65536>;
+@group(0) @binding(0) var<uniform> config: Config;
+@group(1) @binding(0) var<storage, read> input : array<Body, {{static_config.max_bodies}}>;
+@group(1) @binding(1) var<storage, read_write> output : array<Body, {{static_config.max_bodies}}>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -28,7 +29,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (idx == other_idx) { return; }
         let separation = input[other_idx].position - input[idx].position;
         let distance = length(separation);
-        if (distance < 1.0) { return; }
+        if (distance < 0.1) { return; }
         acceleration += input[other_idx].mu / pow(distance, 3.0) * separation;
     }
     output[idx].velocity += acceleration * config.dt;

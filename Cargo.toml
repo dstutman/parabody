@@ -10,4 +10,6 @@ bytemuck = { version = "1.12.1", features = ["derive"] }
 env_logger = "0.9.1"
 log = "0.4.17"
 pollster = "0.2.5"
+serde = { version = "1.0.145", features = ["derive"] }
+tera = { version = "1.17.1", default-features = false }
 wgpu = "0.13.1"

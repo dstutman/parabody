@@ -9,10 +9,10 @@ use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferSlice,
     BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
     DeviceDescriptor, Features, Instance, Limits, Maintain, MapMode, PipelineLayoutDescriptor,
-    PowerPreference, RequestAdapterOptions, ShaderModuleDescriptor, ShaderStages,
+    PowerPreference, RequestAdapterOptions, ShaderStages,
 };
 
-use crate::structures::{Body, Config};
+use crate::structures::{Body, DynamicConfig, StaticConfig};
 pub struct Pipeline {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -22,7 +22,8 @@ pub struct Pipeline {
     config_buffer: wgpu::Buffer,
     body_buffers: [wgpu::Buffer; 2],
     active_source: SourceBuffer,
-    config: Config,
+    static_config: StaticConfig,
+    dynamic_config: DynamicConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,10 +43,28 @@ impl SourceBuffer {
 
 impl Pipeline {
     pub async fn create(
-        shader: ShaderModuleDescriptor<'_>,
+        shader_src: &'static str,
         entry_point: &'static str,
-        config: Config,
+        static_config: StaticConfig,
     ) -> Self {
+        // Render the shader with its static configuration
+        let mut tera = tera::Tera::default();
+        tera.add_raw_template("shader", shader_src).unwrap();
+        let mut context = tera::Context::new();
+        context.insert("static_config", &static_config);
+        let shader = wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                tera.render("shader", &context)
+                    .expect("Failed to render shader from template")
+                    .into(),
+            ),
+        };
+
+        // Create default config
+        let dynamic_config = DynamicConfig::default();
+
+        // Construct the pipeline
         let instance = Instance::new(Backends::all());
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
@@ -74,7 +93,7 @@ impl Pipeline {
                 binding: 0,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
+                    ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -119,26 +138,26 @@ impl Pipeline {
         });
         let config_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Config"),
-            size: size_of::<Config>() as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::MAP_READ | BufferUsages::MAP_WRITE,
+            size: size_of::<DynamicConfig>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::MAP_WRITE,
             mapped_at_creation: false,
         });
         let body_buffers = [
             device.create_buffer(&BufferDescriptor {
                 label: Some("Buffer A"),
-                size: (config.num_bodies as usize * size_of::<Body>()) as u64,
+                size: (static_config.max_bodies as usize * size_of::<Body>()) as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::MAP_READ | BufferUsages::MAP_WRITE,
                 mapped_at_creation: false,
             }),
             device.create_buffer(&BufferDescriptor {
                 label: Some("Buffer B"),
-                size: (config.num_bodies as usize * size_of::<Body>()) as u64,
+                size: (static_config.max_bodies as usize * size_of::<Body>()) as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::MAP_READ | BufferUsages::MAP_WRITE,
                 mapped_at_creation: false,
             }),
         ];
 
-        let pipeline = Self {
+        let mut pipeline = Self {
             device,
             queue,
             config_bindgroup_layout,
@@ -146,43 +165,45 @@ impl Pipeline {
             pipeline,
             config_buffer,
             body_buffers,
-            config,
+            static_config,
+            dynamic_config,
             active_source: SourceBuffer::A,
         };
-        pipeline.write_config();
+        pipeline.synchronize_dynamic_config();
 
         pipeline
     }
 
-    fn write_config(&self) {
-        // Map the config buffer and write the data from the host to the GPU
-        let mut config_slice = {
-            let slice = self.config_buffer.slice(..);
-            self.map_slice_blocking(slice);
-            slice.get_mapped_range_mut()
-        };
+    pub fn set_dt(&mut self, dt: f32) {
+        self.dynamic_config.dt = dt;
+    }
 
-        let config_bytes: [u8; size_of::<Config>()] = bytemuck::cast(self.config);
-        config_slice.as_mut().copy_from_slice(&config_bytes);
-        drop(config_slice);
+    fn synchronize_dynamic_config(&mut self) {
+        // Map the config buffer and write the data from the host to the GPU
+        let slice = self.config_buffer.slice(..);
+        self.map_slice_blocking(MapMode::Write, slice);
+        {
+            let mut config = slice.get_mapped_range_mut();
+            let config_bytes: [u8; size_of::<DynamicConfig>()] =
+                bytemuck::cast(self.dynamic_config);
+            config.as_mut().copy_from_slice(&config_bytes);
+        }
         self.config_buffer.unmap();
     }
 
-    pub fn write_bodies(&self, input: &[Body]) {
-        assert!(input.len() == self.config.num_bodies as usize);
+    pub fn write_bodies(&mut self, input: &[Body]) {
+        assert!(input.len() <= self.static_config.max_bodies as usize);
+        self.dynamic_config.num_bodies = input.len() as u32;
         // Map the input buffer and write the data from the host to the GPU
-        let mut input_slice = {
-            let slice = match self.active_source {
-                SourceBuffer::A => self.body_buffers[0].slice(..),
-                SourceBuffer::B => self.body_buffers[1].slice(..),
-            };
-            self.map_slice_blocking(slice);
-            slice.get_mapped_range_mut()
+        let slice = match self.active_source {
+            SourceBuffer::A => self.body_buffers[0].slice(..),
+            SourceBuffer::B => self.body_buffers[1].slice(..),
         };
-        input_slice
-            .as_mut()
-            .copy_from_slice(bytemuck::cast_slice(input));
-        drop(input_slice);
+        self.map_slice_blocking(MapMode::Write, slice);
+        {
+            let mut source = slice.get_mapped_range_mut();
+            source.as_mut().copy_from_slice(bytemuck::cast_slice(input));
+        }
         match self.active_source {
             SourceBuffer::A => self.body_buffers[0].unmap(),
             SourceBuffer::B => self.body_buffers[1].unmap(),
@@ -191,13 +212,13 @@ impl Pipeline {
 
     pub fn read_bodies(&self) -> Vec<Body> {
         // Wait for the output buffer to become mappable and read it out to the host
-        let output_slice = match self.active_source {
-            SourceBuffer::A => self.body_buffers[1].slice(..),
-            SourceBuffer::B => self.body_buffers[0].slice(..),
+        let upper_bound = (self.dynamic_config.num_bodies * size_of::<Body>() as u32) as u64;
+        let slice = match self.active_source {
+            SourceBuffer::A => self.body_buffers[1].slice(..upper_bound),
+            SourceBuffer::B => self.body_buffers[0].slice(..upper_bound),
         };
-        self.map_slice_blocking(output_slice);
-        let output = bytemuck::cast_slice(output_slice.get_mapped_range().as_ref()).to_owned();
-        drop(output_slice);
+        self.map_slice_blocking(MapMode::Read, slice);
+        let output = bytemuck::cast_slice(slice.get_mapped_range().as_ref()).to_owned();
         match self.active_source {
             SourceBuffer::A => self.body_buffers[1].unmap(),
             SourceBuffer::B => self.body_buffers[0].unmap(),
@@ -206,6 +227,8 @@ impl Pipeline {
     }
 
     pub fn submit_and_block(&mut self, num_passes: usize) {
+        // Synchronize configurations
+        self.synchronize_dynamic_config();
         // Fire off the job
         let config_bindgroup = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Config bind group"),
@@ -256,7 +279,11 @@ impl Pipeline {
                 SourceBuffer::A => pass.set_bind_group(1, &active_a_bindgroup, &[]),
                 SourceBuffer::B => pass.set_bind_group(1, &active_b_bindgroup, &[]),
             };
-            pass.dispatch_workgroups(self.config.num_bodies / 64, 1, 1);
+            pass.dispatch_workgroups(
+                (self.dynamic_config.num_bodies as f32 / 64.0).ceil() as u32,
+                1,
+                1,
+            );
             self.active_source = self.active_source.other();
         }
 
@@ -276,10 +303,10 @@ impl Pipeline {
         println!("Done");
     }
 
-    pub fn map_slice_blocking(&self, slice: BufferSlice) {
+    pub fn map_slice_blocking(&self, mode: MapMode, slice: BufferSlice) {
         let signal = Arc::new(AtomicBool::new(false));
         let moved_signal = signal.clone();
-        slice.map_async(MapMode::Read, move |result| {
+        slice.map_async(mode, move |result| {
             result.expect("Failed to map output buffer for reading");
             moved_signal.store(true, Ordering::SeqCst);
         });
