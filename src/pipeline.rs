@@ -195,9 +195,10 @@ impl Pipeline {
         assert!(input.len() <= self.static_config.max_bodies as usize);
         self.dynamic_config.num_bodies = input.len() as u32;
         // Map the input buffer and write the data from the host to the GPU
+        let upper_bound = (self.dynamic_config.num_bodies * size_of::<Body>() as u32) as u64;
         let slice = match self.active_source {
-            SourceBuffer::A => self.body_buffers[0].slice(..),
-            SourceBuffer::B => self.body_buffers[1].slice(..),
+            SourceBuffer::A => self.body_buffers[0].slice(..upper_bound),
+            SourceBuffer::B => self.body_buffers[1].slice(..upper_bound),
         };
         self.map_slice_blocking(MapMode::Write, slice);
         {
