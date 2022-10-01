@@ -9,7 +9,7 @@ use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferSlice,
     BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
     DeviceDescriptor, Features, Instance, Limits, Maintain, MapMode, PipelineLayoutDescriptor,
-    PowerPreference, RequestAdapterOptions, ShaderStages,
+    PowerPreference, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
 use crate::structures::{Body, DynamicConfig, StaticConfig};
@@ -52,9 +52,9 @@ impl Pipeline {
         tera.add_raw_template("shader", shader_src).unwrap();
         let mut context = tera::Context::new();
         context.insert("static_config", &static_config);
-        let shader = wgpu::ShaderModuleDescriptor {
+        let shader = ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(
+            source: ShaderSource::Wgsl(
                 tera.render("shader", &context)
                     .expect("Failed to render shader from template")
                     .into(),
